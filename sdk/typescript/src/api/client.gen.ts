@@ -1795,6 +1795,13 @@ export type GitRepositoryBranchesOpts = {
   patterns?: string[]
 }
 
+export type GitRepositoryLatestOpts = {
+  /**
+   * Include semantic-version prereleases when selecting the latest release.
+   */
+  includeSubreleases?: boolean
+}
+
 export type GitRepositoryTagsOpts = {
   /**
    * Glob patterns (e.g., "refs/tags/v*").
@@ -10957,6 +10964,17 @@ export class GitRepository extends BaseClient {
    */
   head = (): GitRef => {
     const ctx = this._ctx.select("head")
+    return new GitRef(ctx)
+  }
+
+  /**
+   * Return the latest release tag. If no release tag exists, fall back to the remote HEAD branch.
+   *
+   * This operation is pinned.
+   * @param opts.includeSubreleases Include semantic-version prereleases when selecting the latest release.
+   */
+  latest = (opts?: GitRepositoryLatestOpts): GitRef => {
+    const ctx = this._ctx.select("latest", { ...opts })
     return new GitRef(ctx)
   }
 

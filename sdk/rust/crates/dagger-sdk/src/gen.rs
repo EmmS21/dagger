@@ -11246,6 +11246,12 @@ pub struct GitRepositoryBranchesOpts<'a> {
     pub patterns: Option<Vec<&'a str>>,
 }
 #[derive(Builder, Debug, PartialEq)]
+pub struct GitRepositoryLatestOpts {
+    /// Include semantic-version prereleases when selecting the latest release.
+    #[builder(setter(into, strip_option), default)]
+    pub include_subreleases: Option<bool>,
+}
+#[derive(Builder, Debug, PartialEq)]
 pub struct GitRepositoryTagsOpts<'a> {
     /// Glob patterns (e.g., "refs/tags/v*").
     #[builder(setter(into, strip_option), default)]
@@ -11369,6 +11375,37 @@ impl GitRepository {
     pub async fn id(&self) -> Result<Id, DaggerError> {
         let query = self.selection.select("id");
         query.execute(self.graphql_client.clone()).await
+    }
+    /// Return the latest release tag. If no release tag exists, fall back to the remote HEAD branch.
+    /// This operation is pinned.
+    ///
+    /// # Arguments
+    ///
+    /// * `opt` - optional argument, see inner type for documentation, use <func>_opts to use
+    pub fn latest(&self) -> GitRef {
+        let query = self.selection.select("latest");
+        GitRef {
+            proc: self.proc.clone(),
+            selection: query,
+            graphql_client: self.graphql_client.clone(),
+        }
+    }
+    /// Return the latest release tag. If no release tag exists, fall back to the remote HEAD branch.
+    /// This operation is pinned.
+    ///
+    /// # Arguments
+    ///
+    /// * `opt` - optional argument, see inner type for documentation, use <func>_opts to use
+    pub fn latest_opts(&self, opts: GitRepositoryLatestOpts) -> GitRef {
+        let mut query = self.selection.select("latest");
+        if let Some(include_subreleases) = opts.include_subreleases {
+            query = query.arg("includeSubreleases", include_subreleases);
+        }
+        GitRef {
+            proc: self.proc.clone(),
+            selection: query,
+            graphql_client: self.graphql_client.clone(),
+        }
     }
     /// Returns details for the latest semver tag.
     pub fn latest_version(&self) -> GitRef {

@@ -10252,6 +10252,29 @@ func (r *GitRepository) MarshalJSON() ([]byte, error) {
 	return json.Marshal(id)
 }
 
+// GitRepositoryLatestOpts contains options for GitRepository.Latest
+type GitRepositoryLatestOpts struct {
+	// Include semantic-version prereleases when selecting the latest release.
+	IncludeSubreleases bool
+}
+
+// Return the latest release tag. If no release tag exists, fall back to the remote HEAD branch.
+//
+// This operation is pinned.
+func (r *GitRepository) Latest(opts ...GitRepositoryLatestOpts) *GitRef {
+	q := r.query.Select("latest")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `includeSubreleases` optional argument
+		if !querybuilder.IsZeroValue(opts[i].IncludeSubreleases) {
+			q = q.Arg("includeSubreleases", opts[i].IncludeSubreleases)
+		}
+	}
+
+	return &GitRef{
+		query: q,
+	}
+}
+
 // Returns details for the latest semver tag.
 func (r *GitRepository) LatestVersion() *GitRef {
 	q := r.query.Select("latestVersion")
