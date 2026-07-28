@@ -78,6 +78,12 @@ func (s *gitSchema) Install(srv *dagql.Server) {
 	dagql.Fields[*core.GitRepository]{
 		dagql.NodeFunc("head", s.head).
 			Doc(`Returns details for HEAD.`),
+		dagql.NodeFunc("latest", s.latest).
+			Doc(`Return the latest release tag. If no release tag exists, fall back to the remote HEAD branch.`, `This operation is pinned.`).
+			Args(
+				dagql.Arg("includeSubreleases").
+					Doc(`Include semantic-version prereleases when selecting the latest release.`),
+			),
 		dagql.NodeFunc("ref", s.ref).
 			Doc(`Returns details of a ref.`).
 			Args(
@@ -876,6 +882,7 @@ type refArgs struct {
 
 const (
 	lockGitHeadOperation   = "git.head"
+	lockGitLatestOperation = "git.latest"
 	lockGitRefOperation    = "git.ref"
 	lockGitBranchOperation = "git.branch"
 	lockGitTagOperation    = "git.tag"
@@ -1367,4 +1374,78 @@ func (s *gitSchema) commonAncestor(
 		return inst, err
 	}
 	return dagql.NewObjectResultForCurrentCall(ctx, srv, result)
+}
+
+type latestArgs struct {
+	IncludeSubreleases bool `default:"false"`
+}
+
+func (s *gitSchema) latest(ctx context.Context, parent dagql.ObjectResult[*core.GitRepository], args latestArgs) (inst dagql.Result[*core.GitRef], _ error) {
+	repo := parent.Self()
+	remoteRepo, isRemote := repo.Backend.(*core.RemoteGitRepository)
+	if !isRemote {
+		ref, err := core.SelectLatestGitRef(repo.Remote, args.IncludeSubreleases)
+		if err != nil {
+			return inst, err
+		}
+		return s.gitRefResult(ctx, parent, ref)
+	}
+
+	const lockPolicy = workspace.PolicyPin
+	lockInputs := []any{remoteRepo.URL.Remote(), args.IncludeSubreleases}
+
+	query, err := core.CurrentQuery(ctx)
+	if err != nil {
+		return inst, err
+	}
+	lockMode, lookupLock, err := lookupLockForMode(ctx, query, lockGitLatestOperation)
+	if err != nil {
+		return inst, err
+	}
+
+	var lockResolution lookupLockResolution
+	if lockMode != workspace.LockModeDisabled {
+		lockResolution, err = resolveLookupFromLock(
+			lockMode,
+			lookupLock.lock,
+			lockGitLatestOperation,
+			lockInputs,
+			lockPolicy,
+		)
+		if err != nil {
+			return inst, fmt.Errorf("%s lock resolution: %w", lockGitLatestOperation, err)
+		}
+		if lockResolution.Pin != "" {
+			ref, err := core.DecodeGitRefPin(lockResolution.Pin)
+			if err != nil {
+				return inst, fmt.Errorf("%s lock value: %w", lockGitLatestOperation, err)
+			}
+			return s.gitRefResult(ctx, parent, ref)
+		}
+	}
+
+	ref, err := core.SelectLatestGitRef(repo.Remote, args.IncludeSubreleases)
+	if err != nil {
+		return inst, err
+	}
+
+	if lockResolution.ShouldWrite && lookupLock != nil {
+		pin, err := core.EncodeGitRefPin(ref)
+		if err != nil {
+			return inst, err
+		}
+		if err := lookupLock.SetLookup(
+			lockCoreNamespace,
+			lockGitLatestOperation,
+			lockInputs,
+			workspace.LookupResult{
+				Value:  pin,
+				Policy: lockPolicy,
+			},
+		); err != nil {
+			return inst, fmt.Errorf("set lock entry for %s: %w", lockGitLatestOperation, err)
+		}
+	}
+
+	return s.gitRefResult(ctx, parent, ref)
 }

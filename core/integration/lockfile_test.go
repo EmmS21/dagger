@@ -623,3 +623,95 @@ func equalLockInputs(actual, expected []any) bool {
 	}
 	return true
 }
+
+const gitLatestCommitQuery = `{
+  git(url: "` + lockTestGitRepoURL + `") {
+    latest {
+      ref
+      commit
+    }
+  }
+}
+`
+
+func (LockfileSuite) TestGitLatestLiveCreatesPin(ctx context.Context, t *testctx.T) {
+	workdir := t.TempDir()
+	hostGitInit(t, workdir)
+	writeEmptyWorkspaceConfig(t, workdir)
+	queryPath := writeQueryDoc(t, workdir, "git-latest.graphql", gitLatestCommitQuery)
+
+	_, err := hostDaggerExec(ctx, t, workdir, "--silent", "--lock=live", "query", "--doc", queryPath)
+	require.NoError(t, err)
+
+	lockBytes, err := os.ReadFile(filepath.Join(workdir, workspace.LockFileName))
+	require.NoError(t, err)
+	assertGitLatestLockEntry(t, lockBytes, false)
+}
+
+func (LockfileSuite) TestGitLatestFrozenUsesPin(ctx context.Context, t *testctx.T) {
+	workdir := t.TempDir()
+	hostGitInit(t, workdir)
+	writeEmptyWorkspaceConfig(t, workdir)
+	queryPath := writeQueryDoc(t, workdir, "git-latest.graphql", gitLatestCommitQuery)
+	writeGitLatestLock(t, workdir, "refs/tags/"+lockTestGitTagName+"@"+lockTestGitTagOldCommit, false)
+
+	out, err := hostDaggerExec(ctx, t, workdir, "--silent", "--lock=frozen", "query", "--doc", queryPath)
+	require.NoError(t, err)
+	require.Contains(t, string(out), "refs/tags/"+lockTestGitTagName)
+	require.Contains(t, string(out), lockTestGitTagOldCommit)
+}
+
+func (LockfileSuite) TestUpdateRefreshesExistingGitLatestEntry(ctx context.Context, t *testctx.T) {
+	workdir := t.TempDir()
+	hostGitInit(t, workdir)
+	writeEmptyWorkspaceConfig(t, workdir)
+	lockPath, originalLock := writeGitLatestLock(t, workdir, "refs/tags/"+lockTestGitTagName+"@"+lockTestGitTagOldCommit, false)
+
+	out, err := hostDaggerExec(ctx, t, workdir, "--silent", "update")
+	require.NoError(t, err)
+	require.Equal(t, "Updated dagger.lock", strings.TrimSpace(string(out)))
+
+	lockBytes, err := os.ReadFile(lockPath)
+	require.NoError(t, err)
+	require.NotEqual(t, originalLock, string(lockBytes))
+	assertGitLatestLockEntry(t, lockBytes, false)
+	require.NotContains(t, string(lockBytes), lockTestGitTagOldCommit)
+}
+
+func writeGitLatestLock(t *testctx.T, workdir, pin string, includeSubreleases bool) (string, string) {
+	t.Helper()
+
+	lock := workspace.NewLock()
+	require.NoError(t, lock.SetLookup("", "git.latest", []any{lockTestGitRepoURL, includeSubreleases}, workspace.LookupResult{
+		Value:  pin,
+		Policy: workspace.PolicyPin,
+	}))
+	lockBytes, err := lock.Marshal()
+	require.NoError(t, err)
+
+	lockPath := filepath.Join(workdir, workspace.LockFileName)
+	require.NoError(t, os.WriteFile(lockPath, lockBytes, 0o600))
+	return lockPath, string(lockBytes)
+}
+
+func assertGitLatestLockEntry(t *testctx.T, lockBytes []byte, includeSubreleases bool) {
+	t.Helper()
+
+	parsed, err := lockfile.Parse(lockBytes)
+	require.NoError(t, err)
+	for _, entry := range parsed.Entries() {
+		if entry.Namespace != "" || entry.Operation != "git.latest" {
+			continue
+		}
+		require.Equal(t, []any{lockTestGitRepoURL, includeSubreleases}, entry.Inputs)
+		require.Equal(t, string(workspace.PolicyPin), entry.Policy)
+		value, ok := entry.Value.(string)
+		require.True(t, ok)
+		ref, commit, found := strings.Cut(value, "@")
+		require.True(t, found)
+		require.True(t, strings.HasPrefix(ref, "refs/tags/") || strings.HasPrefix(ref, "refs/heads/"), ref)
+		require.Len(t, commit, 40)
+		return
+	}
+	require.Fail(t, "expected git.latest entry in lockfile")
+}

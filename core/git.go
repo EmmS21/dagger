@@ -14,6 +14,7 @@ import (
 	"github.com/dagger/dagger/internal/buildkit/identity"
 	"github.com/dagger/dagger/util/gitutil"
 	"github.com/vektah/gqlparser/v2/ast"
+	"golang.org/x/mod/semver"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 
@@ -53,6 +54,82 @@ type GitRefBackend interface {
 	Tree(ctx context.Context, srv *dagql.Server, discard bool, depth int, includeTags bool) (checkout *Directory, err error)
 
 	mount(ctx context.Context, depth int, includeTags bool, fn func(*gitutil.GitCLI) error) error
+}
+
+// SelectLatestGitRef selects the greatest semantic-version tag in remote,
+// falling back to HEAD when the remote has no release tags.
+func SelectLatestGitRef(remote *gitutil.Remote, includeSubreleases bool) (*gitutil.Ref, error) {
+	if remote == nil {
+		return nil, fmt.Errorf("select latest git ref: nil remote")
+	}
+
+	var (
+		bestRef     string
+		bestVersion string
+	)
+	for _, ref := range remote.Tags().Refs {
+		version := ref.ShortName()
+		if !strings.HasPrefix(version, "v") {
+			version = "v" + version
+		}
+		if !semver.IsValid(version) {
+			continue
+		}
+		if !includeSubreleases && semver.Prerelease(version) != "" {
+			continue
+		}
+
+		comparison := semver.Compare(version, bestVersion)
+		if bestRef == "" || comparison > 0 || (comparison == 0 && ref.Name > bestRef) {
+			bestRef = ref.Name
+			bestVersion = version
+		}
+	}
+
+	if bestRef == "" {
+		ref, err := remote.Lookup("HEAD")
+		if err != nil {
+			return nil, fmt.Errorf("resolve git remote HEAD: %w", err)
+		}
+		return ref, nil
+	}
+
+	ref, err := remote.Lookup(bestRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolve latest git release %q: %w", bestRef, err)
+	}
+	return ref, nil
+}
+
+// EncodeGitRefPin stores both the symbolic ref and resolved commit in a single
+// lock value so frozen resolution can replay the ref without listing the remote.
+func EncodeGitRefPin(ref *gitutil.Ref) (string, error) {
+	if ref == nil {
+		return "", fmt.Errorf("encode git ref pin: nil ref")
+	}
+	if ref.Name == "" {
+		return "", fmt.Errorf("encode git ref pin: ref name is required")
+	}
+	if !gitutil.IsCommitSHA(ref.SHA) {
+		return "", fmt.Errorf("encode git ref pin: invalid commit SHA %q", ref.SHA)
+	}
+	return ref.Name + "@" + ref.SHA, nil
+}
+
+// DecodeGitRefPin decodes a symbolic-ref-and-commit lock value.
+func DecodeGitRefPin(pin string) (*gitutil.Ref, error) {
+	separator := strings.LastIndex(pin, "@")
+	if separator <= 0 {
+		return nil, fmt.Errorf("invalid git ref pin %q", pin)
+	}
+	name, sha := pin[:separator], pin[separator+1:]
+	if name == "" {
+		return nil, fmt.Errorf("invalid git ref pin %q", pin)
+	}
+	if !gitutil.IsCommitSHA(sha) {
+		return nil, fmt.Errorf("invalid git ref pin commit %q", sha)
+	}
+	return &gitutil.Ref{Name: name, SHA: sha}, nil
 }
 
 var _ dagql.PersistedObject = (*GitRepository)(nil)
